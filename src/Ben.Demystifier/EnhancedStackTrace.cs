@@ -11,6 +11,8 @@ namespace System.Diagnostics
 {
     public partial class EnhancedStackTrace : StackTrace, IEnumerable<EnhancedStackFrame>
     {
+        public static EnhancedStackTraceOptions Options { get; set; } = new EnhancedStackTraceOptions();
+
         public static EnhancedStackTrace Current() => new EnhancedStackTrace(new StackTrace(1 /* skip this one frame */, true));
 
         private readonly List<EnhancedStackFrame> _frames;
@@ -102,20 +104,34 @@ namespace System.Diagnostics
                 sb.Append("   at ");
                 frame.MethodInfo.Append(sb);
 
-                var filePath = frame.GetFileName();
-                if (!string.IsNullOrEmpty(filePath))
+                if (Options.ShowFileNamesInStackTrace)
                 {
-                    sb.Append(" in ");
-                    sb.Append(TryGetFullPath(filePath));
+                    var filePath = frame.GetFileName();
+                    if (!string.IsNullOrEmpty(filePath))
+                    {
+                        sb.Append(" in ");
+                        sb.Append(TryGetFullPath(filePath));
 
+                    }
+
+                    var lineNo = frame.GetFileLineNumber();
+                    if (lineNo != 0)
+                    {
+                        sb.Append(":line ");
+                        sb.Append(lineNo);
+                    }
+                }
+                else
+                {
+                    var lineNo = frame.GetFileLineNumber();
+                    if (lineNo != 0)
+                    {
+                        sb.Append(" at line ");
+                        sb.Append(lineNo);
+                    }
                 }
 
-                var lineNo = frame.GetFileLineNumber();
-                if (lineNo != 0)
-                {
-                    sb.Append(":line ");
-                    sb.Append(lineNo);
-                }
+
             }
         }
 

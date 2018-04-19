@@ -60,11 +60,11 @@ namespace System.Diagnostics
                     var row = frame.GetFileLineNumber();
                     var column = frame.GetFileColumnNumber();
                     var ilOffset = frame.GetILOffset();
-                    if (string.IsNullOrEmpty(fileName) && ilOffset >= 0)
+                    if (Options.ShowFileNamesInStackTrace && string.IsNullOrEmpty(fileName) && ilOffset >= 0)
                     {
                         // .NET Framework and older versions of mono don't support portable PDBs
                         // so we read it manually to get file name and line information
-                        portablePdbReader.PopulateStackFrame(frame, method, frame.GetILOffset(), out fileName, out row, out column);
+                        portablePdbReader.PopulateStackFrame(frame, method, ilOffset, out fileName, out row, out column);
                     }
 
                     var stackFrame = new EnhancedStackFrame(frame, GetMethodDisplayString(method), fileName, row, column);
