@@ -80,12 +80,17 @@ namespace System.Diagnostics
             }
         }
 
-        private static readonly MemoryCache CACHE = new MemoryCache(new MemoryCacheOptions(){ExpirationScanFrequency = TimeSpan.FromHours(1), SizeLimit = 1024*1024*300});
+
+        private static readonly MemoryCache CACHE = new MemoryCache(new MemoryCacheOptions()
+        {
+            ExpirationScanFrequency = TimeSpan.FromDays(1), // primary we want to use the size limit
+            SizeLimit = 1024*1024*10
+        });
 
         public static string GetMethodDisplayString(MethodBase originMethod)
         {
             return 
-                CACHE.GetOrCreate(originMethod.GetHashCode(), e =>
+                CACHE.GetOrCreate(originMethod.GetHashCode() + ".GetMethodDisplayString", e =>
                 {
                     // Special case: no method available
                     if (originMethod == null)
@@ -659,91 +664,101 @@ namespace System.Diagnostics
         private static bool ShowInStackTrace(MethodBase method)
         {
             Debug.Assert(method != null);
-            try
-            {
-                var type = method.DeclaringType;
-                if (type == typeof(Task<>) && method.Name == "InnerInvoke")
-                {
-                    return false;
-                }
-                if (type == typeof(Task))
-                {
-                    switch (method.Name)
-                    {
-                        case "ExecuteWithThreadLocal":
-                        case "Execute":
-                        case "ExecutionContextCallback":
-                        case "ExecuteEntry":
-                        case "InnerInvoke":
-                            return false;
-                    }
-                }
-                if (type == typeof(ExecutionContext))
-                {
-                    switch (method.Name)
-                    {
-                        case "RunInternal":
-                        case "Run":
-                            return false;
-                    }
-                }
 
-                // Don't show any methods marked with the StackTraceHiddenAttribute
-                // https://github.com/dotnet/coreclr/pull/14652
-                foreach (var attibute in EnumerableIList.Create(method.GetCustomAttributesData()))
+            return
+                CACHE.GetOrCreate(method.GetHashCode() + ".ShowInStackTrace", e =>
                 {
-                    // internal Attribute, match on name
-                    if (attibute.AttributeType.Name == "StackTraceHiddenAttribute")
-                    {
-                        return false;
-                    }
-                }
+                    e.SlidingExpiration = TimeSpan.FromDays(1);
+                    e.Size = sizeof(bool);
 
-                if (type == null)
-                {
+                    try
+                    {
+                        var type = method.DeclaringType;
+                        if (type == typeof(Task<>) && method.Name == "InnerInvoke")
+                        {
+                            return false;
+                        }
+
+                        if (type == typeof(Task))
+                        {
+                            switch (method.Name)
+                            {
+                                case "ExecuteWithThreadLocal":
+                                case "Execute":
+                                case "ExecutionContextCallback":
+                                case "ExecuteEntry":
+                                case "InnerInvoke":
+                                    return false;
+                            }
+                        }
+
+                        if (type == typeof(ExecutionContext))
+                        {
+                            switch (method.Name)
+                            {
+                                case "RunInternal":
+                                case "Run":
+                                    return false;
+                            }
+                        }
+
+                        // Don't show any methods marked with the StackTraceHiddenAttribute
+                        // https://github.com/dotnet/coreclr/pull/14652
+                        foreach (var attibute in EnumerableIList.Create(method.GetCustomAttributesData()))
+                        {
+                            // internal Attribute, match on name
+                            if (attibute.AttributeType.Name == "StackTraceHiddenAttribute")
+                            {
+                                return false;
+                            }
+                        }
+
+                        if (type == null)
+                        {
+                            return true;
+                        }
+
+                        foreach (var attibute in EnumerableIList.Create(type.GetCustomAttributesData()))
+                        {
+                            // internal Attribute, match on name
+                            if (attibute.AttributeType.Name == "StackTraceHiddenAttribute")
+                            {
+                                return false;
+                            }
+                        }
+
+                        // Fallbacks for runtime pre-StackTraceHiddenAttribute
+                        if (type == typeof(ExceptionDispatchInfo) && method.Name == "Throw")
+                        {
+                            return false;
+                        }
+                        else if (type == typeof(TaskAwaiter) ||
+                                 type == typeof(TaskAwaiter<>) ||
+                                 type == typeof(ConfiguredTaskAwaitable.ConfiguredTaskAwaiter) ||
+                                 type == typeof(ConfiguredTaskAwaitable<>.ConfiguredTaskAwaiter))
+                        {
+                            switch (method.Name)
+                            {
+                                case "HandleNonSuccessAndDebuggerNotification":
+                                case "ThrowForNonSuccess":
+                                case "ValidateEnd":
+                                case "GetResult":
+                                    return false;
+                            }
+                        }
+                        else if (type.FullName == "System.ThrowHelper")
+                        {
+                            return false;
+                        }
+                    }
+                    catch
+                    {
+                        // GetCustomAttributesData can throw
+                        return true;
+                    }
+
                     return true;
-                }
-
-                foreach (var attibute in EnumerableIList.Create(type.GetCustomAttributesData()))
-                {
-                    // internal Attribute, match on name
-                    if (attibute.AttributeType.Name == "StackTraceHiddenAttribute")
-                    {
-                        return false;
-                    }
-                }
-
-                // Fallbacks for runtime pre-StackTraceHiddenAttribute
-                if (type == typeof(ExceptionDispatchInfo) && method.Name == "Throw")
-                {
-                    return false;
-                }
-                else if (type == typeof(TaskAwaiter) ||
-                    type == typeof(TaskAwaiter<>) ||
-                    type == typeof(ConfiguredTaskAwaitable.ConfiguredTaskAwaiter) ||
-                    type == typeof(ConfiguredTaskAwaitable<>.ConfiguredTaskAwaiter))
-                {
-                    switch (method.Name)
-                    {
-                        case "HandleNonSuccessAndDebuggerNotification":
-                        case "ThrowForNonSuccess":
-                        case "ValidateEnd":
-                        case "GetResult":
-                            return false;
-                    }
-                }
-                else if (type.FullName == "System.ThrowHelper")
-                {
-                    return false;
-                }
-            }
-            catch
-            {
-                // GetCustomAttributesData can throw
-                return true;
-            }
-
-            return true;
+                });
         }
 
         private static bool TryResolveStateMachineMethod(ref MethodBase method, out Type declaringType)
