@@ -4,16 +4,20 @@
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Generic.Enumerable;
 using System.Diagnostics.Internal;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
+using System.Runtime.Serialization.Formatters.Binary;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace System.Diagnostics
 {
@@ -69,7 +73,6 @@ namespace System.Diagnostics
 
                     var stackFrame = new EnhancedStackFrame(frame, GetMethodDisplayString(method), fileName, row, column);
 
-
                     frames.Add(stackFrame);
                 }
 
@@ -77,161 +80,179 @@ namespace System.Diagnostics
             }
         }
 
-        public static ResolvedMethod GetMethodDisplayString(MethodBase originMethod)
+        private static readonly MemoryCache CACHE = new MemoryCache(new MemoryCacheOptions(){ExpirationScanFrequency = TimeSpan.FromHours(1), SizeLimit = 1024*1024*300});
+
+        public static string GetMethodDisplayString(MethodBase originMethod)
         {
-            // Special case: no method available
-            if (originMethod == null)
-            {
-                return null;
-            }
-
-            var method = originMethod;
-
-            var methodDisplayInfo = new ResolvedMethod
-            {
-                SubMethodBase = method
-            };
-
-            // Type name
-            var type = method.DeclaringType;
-
-            var subMethodName = method.Name;
-            var methodName = method.Name;
-
-            if (type != null && type.IsDefined(typeof(CompilerGeneratedAttribute)) &&
-                (typeof(IAsyncStateMachine).IsAssignableFrom(type) || typeof(IEnumerator).IsAssignableFrom(type)))
-            {
-                methodDisplayInfo.IsAsync = typeof(IAsyncStateMachine).IsAssignableFrom(type);
-
-                // Convert StateMachine methods to correct overload +MoveNext()
-                if (!TryResolveStateMachineMethod(ref method, out type))
+            return 
+                CACHE.GetOrCreate(originMethod.GetHashCode(), e =>
                 {
-                    methodDisplayInfo.SubMethodBase = null;
-                    subMethodName = null;
-                }
+                    // Special case: no method available
+                    if (originMethod == null)
+                    {
+                        return null;
+                    }
 
-                methodName = method.Name;
-            }
+                    var method = originMethod;
 
-            // Method name
-            methodDisplayInfo.MethodBase = method;
-            methodDisplayInfo.Name = methodName;
-            if (method.Name.IndexOf("<") >= 0)
-            {
-                if (TryResolveGeneratedName(ref method, out type, out methodName, out subMethodName, out var kind, out var ordinal))
-                {
-                    methodName = method.Name;
+                    var methodDisplayInfo = new ResolvedMethod
+                    {
+                        SubMethodBase = method
+                    };
+
+                    // Type name
+                    var type = method.DeclaringType;
+
+                    var subMethodName = method.Name;
+                    var methodName = method.Name;
+
+                    if (type != null && type.IsDefined(typeof(CompilerGeneratedAttribute)) &&
+                        (typeof(IAsyncStateMachine).IsAssignableFrom(type) || typeof(IEnumerator).IsAssignableFrom(type)))
+                    {
+                        methodDisplayInfo.IsAsync = typeof(IAsyncStateMachine).IsAssignableFrom(type);
+
+                        // Convert StateMachine methods to correct overload +MoveNext()
+                        if (!TryResolveStateMachineMethod(ref method, out type))
+                        {
+                            methodDisplayInfo.SubMethodBase = null;
+                            subMethodName = null;
+                        }
+
+                        methodName = method.Name;
+                    }
+
+                    // Method name
                     methodDisplayInfo.MethodBase = method;
                     methodDisplayInfo.Name = methodName;
-                    methodDisplayInfo.Ordinal = ordinal;
-                }
-                else
-                {
-                    methodDisplayInfo.MethodBase = null;
-                }
-
-                methodDisplayInfo.IsLambda = (kind == GeneratedNameKind.LambdaMethod);
-
-                if (methodDisplayInfo.IsLambda && type != null)
-                {
-                    if (methodName == ".cctor")
+                    if (method.Name.IndexOf("<") >= 0)
                     {
-                        var fields = type.GetFields(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-                        foreach (var field in fields)
+                        if (TryResolveGeneratedName(ref method, out type, out methodName, out subMethodName, out var kind,
+                            out var ordinal))
                         {
-                            var value = field.GetValue(field);
-                            if (value is Delegate d)
+                            methodName = method.Name;
+                            methodDisplayInfo.MethodBase = method;
+                            methodDisplayInfo.Name = methodName;
+                            methodDisplayInfo.Ordinal = ordinal;
+                        }
+                        else
+                        {
+                            methodDisplayInfo.MethodBase = null;
+                        }
+
+                        methodDisplayInfo.IsLambda = (kind == GeneratedNameKind.LambdaMethod);
+
+                        if (methodDisplayInfo.IsLambda && type != null)
+                        {
+                            if (methodName == ".cctor")
                             {
-                                if (ReferenceEquals(d.Method, originMethod) &&
-                                    d.Target.ToString() == originMethod.DeclaringType.ToString())
+                                var fields =
+                                    type.GetFields(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                                foreach (var field in fields)
                                 {
-                                    methodDisplayInfo.Name = field.Name;
-                                    methodDisplayInfo.IsLambda = false;
-                                    method = originMethod;
-                                    break;
+                                    var value = field.GetValue(field);
+                                    if (value is Delegate d)
+                                    {
+                                        if (ReferenceEquals(d.Method, originMethod) &&
+                                            d.Target.ToString() == originMethod.DeclaringType.ToString())
+                                        {
+                                            methodDisplayInfo.Name = field.Name;
+                                            methodDisplayInfo.IsLambda = false;
+                                            method = originMethod;
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            }
 
-            if (subMethodName != methodName)
-            {
-                methodDisplayInfo.SubMethod = subMethodName;
-            }
-
-            // ResolveStateMachineMethod may have set declaringType to null
-            if (type != null)
-            {
-                var declaringTypeName = TypeNameHelper.GetTypeDisplayName(type, fullName: true, includeGenericParameterNames: true);
-                methodDisplayInfo.DeclaringTypeName = declaringTypeName;
-            }
-
-            if (method is System.Reflection.MethodInfo mi)
-            {
-                var returnParameter = mi.ReturnParameter;
-                if (returnParameter != null)
-                {
-                    methodDisplayInfo.ReturnParameter = GetParameter(mi.ReturnParameter);
-                }
-                else if (mi.ReturnType != null)
-                {
-                    methodDisplayInfo.ReturnParameter = new ResolvedParameter
+                    if (subMethodName != methodName)
                     {
-                        Prefix = "",
-                        Name = "",
-                        Type = TypeNameHelper.GetTypeDisplayName(mi.ReturnType, fullName: false, includeGenericParameterNames: true).ToString(),
-                        ResolvedType = mi.ReturnType,
-                    };
-                }
-            }
-
-            if (method.IsGenericMethod)
-            {
-                var genericArguments = method.GetGenericArguments();
-                var genericArgumentsString = string.Join(", ", genericArguments
-                    .Select(arg => TypeNameHelper.GetTypeDisplayName(arg, fullName: false, includeGenericParameterNames: true)));
-                methodDisplayInfo.GenericArguments += "<" + genericArgumentsString + ">";
-                methodDisplayInfo.ResolvedGenericArguments = genericArguments;
-            }
-
-            // Method parameters
-            var parameters = method.GetParameters();
-            if (parameters.Length > 0)
-            {
-                var parameterList = new List<ResolvedParameter>(parameters.Length);
-                foreach (var parameter in parameters)
-                {
-                    parameterList.Add(GetParameter(parameter));
-                }
-
-                methodDisplayInfo.Parameters = parameterList;
-            }
-
-            if (methodDisplayInfo.SubMethodBase == methodDisplayInfo.MethodBase)
-            {
-                methodDisplayInfo.SubMethodBase = null;
-            }
-            else if (methodDisplayInfo.SubMethodBase != null)
-            {
-                parameters = methodDisplayInfo.SubMethodBase.GetParameters();
-                if (parameters.Length > 0)
-                {
-                    var parameterList = new List<ResolvedParameter>(parameters.Length);
-                    foreach (var parameter in parameters)
-                    {
-                        var param = GetParameter(parameter);
-                        if (param.Name?.StartsWith("<") ?? true) continue;
-
-                        parameterList.Add(param);
+                        methodDisplayInfo.SubMethod = subMethodName;
                     }
 
-                    methodDisplayInfo.SubMethodParameters = parameterList;
-                }
-            }
+                    // ResolveStateMachineMethod may have set declaringType to null
+                    if (type != null)
+                    {
+                        var declaringTypeName =
+                            TypeNameHelper.GetTypeDisplayName(type, fullName: true, includeGenericParameterNames: true);
+                        methodDisplayInfo.DeclaringTypeName = declaringTypeName;
+                    }
 
-            return methodDisplayInfo;
+                    if (method is System.Reflection.MethodInfo mi)
+                    {
+                        var returnParameter = mi.ReturnParameter;
+                        if (returnParameter != null)
+                        {
+                            methodDisplayInfo.ReturnParameter = GetParameter(mi.ReturnParameter);
+                        }
+                        else if (mi.ReturnType != null)
+                        {
+                            methodDisplayInfo.ReturnParameter = new ResolvedParameter
+                            {
+                                Prefix = "",
+                                Name = "",
+                                Type = TypeNameHelper.GetTypeDisplayName(mi.ReturnType, fullName: false,
+                                    includeGenericParameterNames: true).ToString(),
+                                ResolvedType = mi.ReturnType,
+                            };
+                        }
+                    }
+
+                    if (method.IsGenericMethod)
+                    {
+                        var genericArguments = method.GetGenericArguments();
+                        var genericArgumentsString = string.Join(", ", genericArguments
+                            .Select(arg =>
+                                TypeNameHelper.GetTypeDisplayName(arg, fullName: false,
+                                    includeGenericParameterNames: true)));
+                        methodDisplayInfo.GenericArguments += "<" + genericArgumentsString + ">";
+                        methodDisplayInfo.ResolvedGenericArguments = genericArguments;
+                    }
+
+                    // Method parameters
+                    var parameters = method.GetParameters();
+                    if (parameters.Length > 0)
+                    {
+                        var parameterList = new List<ResolvedParameter>(parameters.Length);
+                        foreach (var parameter in parameters)
+                        {
+                            parameterList.Add(GetParameter(parameter));
+                        }
+
+                        methodDisplayInfo.Parameters = parameterList;
+                    }
+
+                    if (methodDisplayInfo.SubMethodBase == methodDisplayInfo.MethodBase)
+                    {
+                        methodDisplayInfo.SubMethodBase = null;
+                    }
+                    else if (methodDisplayInfo.SubMethodBase != null)
+                    {
+                        parameters = methodDisplayInfo.SubMethodBase.GetParameters();
+                        if (parameters.Length > 0)
+                        {
+                            var parameterList = new List<ResolvedParameter>(parameters.Length);
+                            foreach (var parameter in parameters)
+                            {
+                                var param = GetParameter(parameter);
+                                if (param.Name?.StartsWith("<") ?? true) continue;
+
+                                parameterList.Add(param);
+                            }
+
+                            methodDisplayInfo.SubMethodParameters = parameterList;
+                        }
+                    }
+
+                    var methodDisplayString = methodDisplayInfo.ToString();
+
+                    e.SlidingExpiration = TimeSpan.FromDays(7);
+                    e.Priority = CacheItemPriority.Low;
+                    e.Size = methodDisplayString.Length;
+                    
+                    return methodDisplayString;
+                });
         }
 
         private static bool TryResolveGeneratedName(ref MethodBase method, out Type type, out string methodName, out string subMethodName, out GeneratedNameKind kind, out int? ordinal)

@@ -102,7 +102,7 @@ namespace System.Diagnostics
                 var frame = frames[i];
 
                 sb.Append("   at ");
-                frame.MethodInfo.Append(sb);
+                sb.Append(frame.MethodInfo);
 
                 if (Options.ShowFileNamesInStackTrace)
                 {

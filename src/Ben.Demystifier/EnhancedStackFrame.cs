@@ -1,4 +1,4 @@
-﻿// Copyright (c) Ben A Adams. All rights reserved.
+// Copyright (c) Ben A Adams. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System.Reflection;
@@ -13,9 +13,9 @@ namespace System.Diagnostics
 
         public StackFrame StackFrame { get; }
 
-        public ResolvedMethod MethodInfo { get; }
+        public string MethodInfo { get; }
 
-        internal EnhancedStackFrame(StackFrame stackFrame, ResolvedMethod methodInfo, string fileName, int lineNumber, int colNumber)
+        internal EnhancedStackFrame(StackFrame stackFrame, string methodInfo, string fileName, int lineNumber, int colNumber)
             : base(fileName, lineNumber, colNumber)
         {
             StackFrame = stackFrame;
@@ -74,6 +74,6 @@ namespace System.Diagnostics
         ///     Builds a readable representation of the stack trace.
         /// </summary>
         /// <returns>A readable representation of the stack trace.</returns>
-        public override string ToString() => MethodInfo.ToString();
+        public override string ToString() => MethodInfo;
     }
 }
